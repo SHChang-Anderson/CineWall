@@ -1,9 +1,10 @@
 venv/
-token.json
-credentials.json
-tmdb_config.json
+backend/config/token.json
+backend/config/credentials.json
+backend/config/tmdb_config.json
 GUIDE_ZH.md
 design.md
 *.bak
 *.pyc
 __pycache__/
+backend/src/__pycache__/

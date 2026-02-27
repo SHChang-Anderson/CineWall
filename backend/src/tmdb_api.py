@@ -12,7 +12,7 @@ class TMDbAPI:
 
     def load_api_key(self) -> Optional[str]:
         # Try to load API key from config file
-        config_file = Path("tmdb_config.json")
+        config_file = Path(__file__).parent.parent / "config" / "tmdb_config.json"
         if config_file.exists():
             try:
                 with open(config_file, 'r') as f:

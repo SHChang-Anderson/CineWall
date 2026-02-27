@@ -18,15 +18,19 @@ class MovieScanner:
 
     def _get_gdrive_service(self):
         creds = None
-        if os.path.exists('token.json'):
-            creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+        config_dir = Path(__file__).parent.parent / "config"
+        token_file = config_dir / 'token.json'
+        credentials_file = config_dir / 'credentials.json'
+
+        if token_file.exists():
+            creds = Credentials.from_authorized_user_file(str(token_file), SCOPES)
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
                 creds.refresh(Request())
             else:
-                flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+                flow = InstalledAppFlow.from_client_secrets_file(str(credentials_file), SCOPES)
                 creds = flow.run_local_server(port=0)
-            with open('token.json', 'w') as token:
+            with open(token_file, 'w') as token:
                 token.write(creds.to_json())
         return build('drive', 'v3', credentials=creds)
 
