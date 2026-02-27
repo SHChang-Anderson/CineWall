@@ -1,2 +1,9 @@
 venv/
 token.json
+credentials.json
+tmdb_config.json
+GUIDE_ZH.md
+design.md
+*.bak
+*.pyc
+__pycache__/
