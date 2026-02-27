@@ -30,41 +30,92 @@ class MovieScanner:
                 token.write(creds.to_json())
         return build('drive', 'v3', credentials=creds)
 
-    def scan_google_drive(self) -> List[Dict]:
+    def _get_folder_id(self, service, folder_name: str) -> Optional[str]:
+        """Find the ID of a folder by its name."""
+        try:
+            query = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+            response = service.files().list(q=query, spaces='drive', fields='files(id, name)').execute()
+            files = response.get('files', [])
+            if files:
+                return files[0].get('id')
+        except Exception as e:
+            print(f"[GDrive] Error finding folder '{folder_name}': {e}")
+        return None
+
+    def scan_google_drive(self, target_folder: str = "movie") -> List[Dict]:
         movies = []
+        print(f"[GDrive] Starting scan in folder: {target_folder}...")
         try:
             service = self._get_gdrive_service()
+            creds = service._http.credentials
+            if not creds.token:
+                creds.refresh(Request())
+            access_token = creds.token
+
+            # 1. Find the target folder ID
+            folder_id = self._get_folder_id(service, target_folder)
+            
+            # 2. Build the query: Search within the folder or everywhere if not found
+            if folder_id:
+                query = f"'{folder_id}' in parents and mimeType contains 'video/' and trashed = false"
+                print(f"[GDrive] Found '{target_folder}' folder ID: {folder_id}")
+            else:
+                query = "mimeType contains 'video/' and trashed = false"
+                print(f"[GDrive] Warning: Folder '{target_folder}' not found. Scanning entire drive.")
+
             page_token = None
             while True:
                 response = service.files().list(
-                    q="mimeType contains 'video/'",
+                    q=query,
                     spaces='drive',
-                    fields='nextPageToken, files(id, name, size)',
+                    fields='nextPageToken, files(id, name, size, mimeType)',
                     pageToken=page_token
                 ).execute()
 
-                for file in response.get('files', []):
-                    title, year = self.parse_filename(Path(file.get('name')).stem)
-                    if title:
-                        movies.append({
-                            'title': title,
-                            'year': year,
-                            'file_path': file.get('id'), # Store ID for GDrive files
-                            'file_size': file.get('size', 0),
-                            'extension': Path(file.get('name')).suffix.lower()
-                        })
+                found_files = response.get('files', [])
+                for file in found_files:
+                    file_name = file.get('name')
+                    file_id = file.get('id')
+                    print(f"[GDrive] Found file: {file_name} (ID: {file_id})")
+                    
+                    # Ensure it's a video type we care about (especially .mkv)
+                    ext = Path(file_name).suffix.lower()
+                    if ext not in self.video_extensions:
+                        continue
+
+                    title, year = self.parse_filename(Path(file_name).stem)
+                    if not title:
+                        title = Path(file_name).stem
+
+                    stream_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&access_token={access_token}"
+                    movies.append({
+                        'id': file_id,
+                        'title': title,
+                        'year': year,
+                        'file_path': file_id,
+                        'file_size': file.get('size', 0),
+                        'extension': ext,
+                        'stream_url': stream_url
+                    })
                 page_token = response.get('nextPageToken', None)
                 if page_token is None:
                     break
-        except HttpError as error:
-            print(f'An error occurred: {error}')
-            # Return empty list or handle error as needed
-            return []
-        except FileNotFoundError:
-            print("Error: 'credentials.json' not found. Please follow the setup instructions.")
+        except Exception as e:
+            print(f"[GDrive] Unexpected error: {e}")
             return []
 
+        print(f"[GDrive] Scan complete. Total: {len(movies)}")
         return sorted(movies, key=lambda x: x['title'])
+
+    def get_stream_url(self, file_id: str) -> Optional[str]:
+        try:
+            service = self._get_gdrive_service()
+            creds = service._http.credentials
+            if not creds.valid:
+                creds.refresh(Request())
+            return f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&access_token={creds.token}"
+        except Exception:
+            return None
 
     def scan_folder(self, folder_path: str) -> List[Dict]:
         if folder_path.lower().strip() == 'gdrive':
