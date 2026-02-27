@@ -17,26 +17,19 @@ class TMDbAPI:
             try:
                 with open(config_file, 'r') as f:
                     config = json.load(f)
-                    return config.get('api_key')
-            except Exception:
-                pass
+                    key = config.get('api_key')
+                    if key and key != "YOUR_TMDB_API_KEY_HERE":
+                        print(f"[TMDB] API Key loaded successfully: {key[:4]}****")
+                        return key
+            except Exception as e:
+                print(f"[TMDB] Error reading config file: {e}")
 
-        # Create sample config file if it doesn't exist
-        if not config_file.exists():
-            sample_config = {
-                "api_key": "YOUR_TMDB_API_KEY_HERE",
-                "instructions": "Get your free API key from https://www.themoviedb.org/settings/api"
-            }
-            try:
-                with open(config_file, 'w') as f:
-                    json.dump(sample_config, f, indent=2)
-            except Exception:
-                pass
-
+        print("[TMDB] WARNING: No valid API Key found in tmdb_config.json")
         return None
 
     def get_poster_url(self, title: str, year: Optional[str] = None) -> Optional[str]:
         if not self.api_key or self.api_key == "YOUR_TMDB_API_KEY_HERE":
+            print("[TMDB] Skipping poster fetch: Missing API Key")
             return None
 
         try:
@@ -44,19 +37,25 @@ class TMDbAPI:
             search_url = f"{self.base_url}/search/movie"
             params = {
                 'api_key': self.api_key,
-                'query': title
+                'query': title,
+                'language': 'zh-TW' # 優先抓中文資訊
             }
 
             if year:
                 params['year'] = year
 
+            print(f"[TMDB] Searching for: {title} ({year or 'N/A'})...")
             response = requests.get(search_url, params=params, timeout=10)
-            response.raise_for_status()
+            
+            if response.status_code != 200:
+                print(f"[TMDB] API Error: {response.status_code} - {response.text}")
+                return None
 
             data = response.json()
             results = data.get('results', [])
 
             if not results:
+                print(f"[TMDB] No results found for '{title}'")
                 return None
 
             # Get the first result (most relevant)
@@ -64,10 +63,14 @@ class TMDbAPI:
             poster_path = movie.get('poster_path')
 
             if poster_path:
-                return f"{self.image_base_url}{poster_path}"
+                url = f"{self.image_base_url}{poster_path}"
+                print(f"[TMDB] Found poster: {url}")
+                return url
+            else:
+                print(f"[TMDB] Movie found, but no poster_path available for '{title}'")
 
         except Exception as e:
-            print(f"Error fetching poster for '{title}': {e}")
+            print(f"[TMDB] Unexpected error fetching poster for '{title}': {e}")
 
         return None
 
