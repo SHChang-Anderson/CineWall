@@ -1,10 +1,21 @@
 from fastapi import FastAPI, Query, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Optional
 from movie_scanner import MovieScanner
 from tmdb_api import TMDbAPI
 import uvicorn
+import asyncio
 
 app = FastAPI()
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 movie_scanner = MovieScanner()
 tmdb_api = TMDbAPI()
@@ -13,30 +24,35 @@ tmdb_api = TMDbAPI()
 async def read_root():
     return {"message": "Welcome to CineWall API"}
 
-@app.get("/movies/local", response_model=List[Dict])
-async def get_local_movies(folder_path: str = Query(..., description="Path to the local movie folder")):
-    """
-    Scan a local folder for movie files and return their information.
-    """
-    if not folder_path:
-        raise HTTPException(status_code=400, detail="Folder path cannot be empty.")
-    
-    movies = movie_scanner.scan_folder(folder_path)
-    if not movies:
-        raise HTTPException(status_code=404, detail=f"No movies found in {folder_path}")
-    
-    return movies
+async def fetch_poster_for_movie(movie: Dict):
+    poster_url = tmdb_api.get_poster_url(movie['title'], movie['year'])
+    if not poster_url:
+        poster_url = 'https://via.placeholder.com/300x450?text=No+Poster'
+    movie['poster_url'] = poster_url
+    return movie
 
 @app.get("/movies/gdrive", response_model=List[Dict])
-async def get_gdrive_movies():
+async def get_gdrive_movies(folder: str = Query("movie", description="The folder to scan on Google Drive")):
     """
-    Scan Google Drive for movie files and return their information.
-    Authentication is handled via `credentials.json` and `token.json` files.
+    Scan a specific Google Drive folder for movie files and return their information including posters.
     """
-    movies = movie_scanner.scan_google_drive()
+    movies = movie_scanner.scan_google_drive(target_folder=folder)
     if not movies:
-        raise HTTPException(status_code=404, detail="No movies found on Google Drive or an error occurred during scanning.")
-    return movies
+        return [] # Return empty list if no movies found
+    
+    # Efficiently fetch posters
+    movies_with_posters = await asyncio.gather(*[fetch_poster_for_movie(m) for m in movies])
+    return movies_with_posters
+
+@app.get("/stream/{file_id}")
+async def get_stream_url(file_id: str):
+    """
+    Returns the direct stream URL for a given Google Drive file ID.
+    """
+    stream_url = movie_scanner.get_stream_url(file_id)
+    if not stream_url:
+        raise HTTPException(status_code=404, detail="Could not generate stream URL.")
+    return {"stream_url": stream_url}
 
 @app.get("/movie/{title}/poster", response_model=Dict)
 async def get_movie_poster(title: str, year: Optional[str] = Query(None, description="Optional release year of the movie")):
