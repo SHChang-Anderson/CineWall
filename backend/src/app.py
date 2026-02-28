@@ -57,22 +57,26 @@ class CineWallUI:
                 ui.badge(movie['extension'].replace('.','').upper()).props('color=blue-9')
 
     def play_video(self, movie):
-        if movie['extension'].lower() == '.mkv':
-            ui.notify('提醒：瀏覽器通常不直接支援 .mkv 播放，建議使用 .mp4 檔案測試。', type='warning', duration=5)
+        # The 'id' of the movie is required to build the stream URL.
+        if not movie.get('id'):
+            ui.notify('錯誤：找不到影片 ID，無法播放。', type='negative')
+            return
+
+        stream_url = f"{API_BASE_URL}/stream/{movie['id']}"
 
         with ui.dialog() as dialog, ui.card().classes('w-[1000px] max-w-none bg-black p-0 overflow-hidden'):
             with ui.row().classes('w-full bg-gray-900 px-4 py-2 items-center justify-between'):
                 ui.label(f"正在播放: {movie['title']}").classes('text-white font-medium')
                 ui.button(icon='close', on_click=dialog.close).props('flat text-color=white')
-            
-            # 增加 onerror 處理
-            v = ui.video(movie['stream_url']).classes('w-full aspect-video')
-            v.on('error', lambda: ui.notify(f'播放失敗！瀏覽器可能不支援此格式 ({movie["extension"]})', type='negative'))
-            
+
+            # The video source now points to our backend's transcoding endpoint.
+            v = ui.video(stream_url, autoplay=True).classes('w-full aspect-video')
+            v.on('error', lambda: ui.notify('播放失敗！後端串流可能發生錯誤，或影片來源有問題。', type='negative'))
+
             with ui.row().classes('p-4 text-gray-500 text-xs gap-4 items-center'):
                 ui.label(f"格式: {movie['extension']}")
-                ui.label(f"大小: {int(movie['file_size'])/(1024*1024):.1f} MB")
-                ui.link('用瀏覽器直接開啟試試', movie['stream_url'], new_tab=True).classes('text-blue-400 underline')
+                ui.label(f"大小: {int(movie.get('file_size', 0))/(1024*1024):.1f} MB")
+                ui.link('用瀏覽器直接開啟串流', stream_url, new_tab=True).classes('text-blue-400 underline')
         dialog.open()
 
 # --- 啟動與佈局 ---
