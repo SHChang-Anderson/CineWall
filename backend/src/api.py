@@ -1,4 +1,6 @@
+import httpx
 from fastapi import FastAPI, Query, HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Optional
 from movie_scanner import MovieScanner
@@ -45,14 +47,90 @@ async def get_gdrive_movies(folder: str = Query("movie", description="The folder
     return movies_with_posters
 
 @app.get("/stream/{file_id}")
-async def get_stream_url(file_id: str):
+async def stream_gdrive_video(file_id: str):
     """
-    Returns the direct stream URL for a given Google Drive file ID.
+    Streams a Google Drive video by downloading it in chunks and feeding it to FFmpeg for on-the-fly transcoding.
+    This provides a robust solution that avoids direct FFmpeg access to the source URL.
     """
-    stream_url = movie_scanner.get_stream_url(file_id)
-    if not stream_url:
-        raise HTTPException(status_code=404, detail="Could not generate stream URL.")
-    return {"stream_url": stream_url}
+    stream_info = movie_scanner.get_stream_info(file_id)
+    if not stream_info:
+        raise HTTPException(status_code=404, detail="Could not generate stream info from Google Drive.")
+
+    async def robust_ffmpeg_streamer():
+        # FFmpeg command now reads from stdin ('-i -')
+        ffmpeg_cmd = [
+            'ffmpeg',
+            '-i', '-',
+            '-vcodec', 'h264_videotoolbox',
+            '-acodec', 'aac',
+            '-preset', 'ultrafast',
+            '-tune', 'zerolatency',
+            '-pix_fmt', 'yuv420p',
+            '-movflags', 'frag_keyframe+empty_moov',
+            '-f', 'mp4',
+            '-loglevel', 'error',
+            'pipe:1'
+        ]
+
+        process = await asyncio.create_subprocess_exec(
+            *ffmpeg_cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+
+        downloader_task = None
+
+        try:
+            # Task 1: Asynchronously download from Google Drive and feed to FFmpeg's stdin
+            async def download_and_feed():
+                try:
+                    # Use the URL and Headers from get_stream_info
+                    async with httpx.AsyncClient(timeout=None) as client:
+                        async with client.stream("GET", stream_info["url"], headers=stream_info["headers"]) as response:
+                            response.raise_for_status()
+                            async for chunk in response.aiter_bytes():
+                                if process.stdin.is_closing():
+                                    break
+                                try:
+                                    process.stdin.write(chunk)
+                                    await process.stdin.drain()
+                                except (BrokenPipeError, ConnectionResetError):
+                                    # This can happen if the client closes the connection
+                                    break
+                except Exception as e:
+                    print(f"Downloader task error: {e}")
+                finally:
+                    if not process.stdin.is_closing():
+                        process.stdin.close()
+
+            downloader_task = asyncio.create_task(download_and_feed())
+
+            # Task 2: Read transcoded data from FFmpeg's stdout and yield to the client
+            while True:
+                chunk = await process.stdout.read(4096)
+                if not chunk:
+                    break
+                yield chunk
+        
+        except Exception as e:
+            print(f"Streaming yield error: {e}")
+
+        finally:
+            # Final cleanup
+            if downloader_task and not downloader_task.done():
+                downloader_task.cancel()
+            if process.returncode is None:
+                process.terminate()
+            
+            stderr_output = await process.stderr.read()
+            if stderr_output:
+                print(f"FFmpeg stderr: {stderr_output.decode()}")
+            
+            await process.wait()
+
+
+    return StreamingResponse(robust_ffmpeg_streamer(), media_type="video/mp4")
 
 @app.get("/movie/{title}/poster", response_model=Dict)
 async def get_movie_poster(title: str, year: Optional[str] = Query(None, description="Optional release year of the movie")):

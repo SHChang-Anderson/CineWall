@@ -111,14 +111,24 @@ class MovieScanner:
         print(f"[GDrive] Scan complete. Total: {len(movies)}")
         return sorted(movies, key=lambda x: x['title'])
 
-    def get_stream_url(self, file_id: str) -> Optional[str]:
+    def get_stream_info(self, file_id: str) -> Optional[Dict[str, any]]:
+        """
+        Gets the necessary info to stream a file, including the clean URL and authorization headers.
+        """
         try:
             service = self._get_gdrive_service()
             creds = service._http.credentials
             if not creds.valid:
                 creds.refresh(Request())
-            return f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&access_token={creds.token}"
-        except Exception:
+            
+            headers = {}
+            creds.apply(headers)  # Applies 'Authorization: Bearer TOKEN' to the headers dict
+            
+            url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
+            
+            return {"url": url, "headers": headers}
+        except Exception as e:
+            print(f"Error getting stream info: {e}")
             return None
 
     def scan_folder(self, folder_path: str) -> List[Dict]:
