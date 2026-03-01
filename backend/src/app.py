@@ -10,16 +10,43 @@ class CineWallUI:
         self.movies = []
         self.loading = False
 
+    async def update_poster(self, movie):
+        """背景抓取海報並即時更新 UI"""
+        try:
+            from urllib.parse import quote
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                # 使用 quote 確保中文字元與特殊符號被正確編碼
+                safe_title = quote(movie['title'])
+                url = f"{API_BASE_URL}/movie/{safe_title}/poster?year={movie['year'] or ''}"
+                response = await client.get(url)
+                if response.status_code == 200:
+                    data = response.json()
+                    movie['poster_url'] = data.get('poster_url')
+                    # 抓到一張就更新一次 UI
+                    self.render_wall.refresh()
+        except Exception as e:
+            print(f"Poster fetch error for {movie['title']}: {e}")
+
     async def fetch_movies(self):
         self.loading = True
         ui.notify('正在從後端獲取影片清單...', type='info')
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
-                # 呼叫 FastAPI 後端 (預設掃描 'movie' 資料夾)
+                # 1. 先抓取基礎清單 (不含海報)
                 response = await client.get(f"{API_BASE_URL}/movies/gdrive?folder=movie")
                 if response.status_code == 200:
                     self.movies = response.json()
-                    ui.notify(f'獲取成功！共有 {len(self.movies)} 部影片', type='positive')
+                    # 初始化海報為佔位圖
+                    for m in self.movies:
+                        m['poster_url'] = 'https://via.placeholder.com/220x330?text=Loading...'
+                    
+                    # 2. 立即渲染 UI 牆面
+                    self.render_wall.refresh()
+                    ui.notify(f'清單已載入，正在背景抓取 {len(self.movies)} 張海報', type='positive')
+
+                    # 3. 同時發起所有海報抓取任務 (並行處理)
+                    for movie in self.movies:
+                        asyncio.create_task(self.update_poster(movie))
                 else:
                     ui.notify(f'後端錯誤: {response.status_code}', type='negative')
         except Exception as e:
@@ -62,21 +89,55 @@ class CineWallUI:
             ui.notify('錯誤：找不到影片 ID，無法播放。', type='negative')
             return
 
-        stream_url = f"{API_BASE_URL}/stream/{movie['id']}"
+        # Base URL for the stream
+        base_stream_url = f"{API_BASE_URL}/stream/{movie['id']}"
 
         with ui.dialog() as dialog, ui.card().classes('w-[1000px] max-w-none bg-black p-0 overflow-hidden'):
             with ui.row().classes('w-full bg-gray-900 px-4 py-2 items-center justify-between'):
                 ui.label(f"正在播放: {movie['title']}").classes('text-white font-medium')
                 ui.button(icon='close', on_click=dialog.close).props('flat text-color=white')
 
-            # The video source now points to our backend's transcoding endpoint.
-            v = ui.video(stream_url, autoplay=True).classes('w-full aspect-video')
-            v.on('error', lambda: ui.notify('播放失敗！後端串流可能發生錯誤，或影片來源有問題。', type='negative'))
+            # We use a custom HTML video element to have better control over seeking
+            video_id = f"video_{movie['id'].replace('-', '_')}"
+            ui.html(f'''
+                <video id="{video_id}" controls autoplay class="w-full aspect-video">
+                    <source src="{base_stream_url}?ss=0" type="video/mp4">
+                    Your browser does not support the video tag.
+                </video>
+            ''', sanitize=False).classes('w-full')
+
+            # Inject the seeking logic via run_javascript
+            ui.run_javascript(f'''
+                const video = document.getElementById("{video_id}");
+                if (video) {{
+                    let isReloading = false;
+                    video.onseeking = function() {{
+                        if (isReloading) return;
+                        
+                        const currentTime = video.currentTime;
+                        let isBuffered = false;
+                        for (let i = 0; i < video.buffered.length; i++) {{
+                            if (currentTime >= video.buffered.start(i) && currentTime <= video.buffered.end(i)) {{
+                                isBuffered = true;
+                                break;
+                            }}
+                        }}
+
+                        if (!isBuffered) {{
+                            isReloading = true;
+                            video.src = "{base_stream_url}?ss=" + currentTime;
+                            video.load();
+                            video.play();
+                            setTimeout(() => {{ isReloading = false; }}, 500);
+                        }}
+                    }};
+                }}
+            ''')
 
             with ui.row().classes('p-4 text-gray-500 text-xs gap-4 items-center'):
                 ui.label(f"格式: {movie['extension']}")
                 ui.label(f"大小: {int(movie.get('file_size', 0))/(1024*1024):.1f} MB")
-                ui.link('用瀏覽器直接開啟串流', stream_url, new_tab=True).classes('text-blue-400 underline')
+                ui.link('用瀏覽器直接開啟串流', base_stream_url, new_tab=True).classes('text-blue-400 underline')
         dialog.open()
 
 # --- 啟動與佈局 ---
