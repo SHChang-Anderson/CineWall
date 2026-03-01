@@ -27,7 +27,7 @@ async def read_root():
     return {"message": "Welcome to CineWall API"}
 
 async def fetch_poster_for_movie(movie: Dict):
-    poster_url = tmdb_api.get_poster_url(movie['title'], movie['year'])
+    poster_url = await tmdb_api.get_poster_url(movie['title'], movie['year'])
     if not poster_url:
         poster_url = 'https://via.placeholder.com/300x450?text=No+Poster'
     movie['poster_url'] = poster_url
@@ -47,26 +47,29 @@ async def get_gdrive_movies(folder: str = Query("movie", description="The folder
     return movies_with_posters
 
 @app.get("/stream/{file_id}")
-async def stream_gdrive_video(file_id: str):
-    """
-    Streams a Google Drive video by downloading it in chunks and feeding it to FFmpeg for on-the-fly transcoding.
-    This provides a robust solution that avoids direct FFmpeg access to the source URL.
-    """
+async def stream_gdrive_video(file_id: str, start_time: float = Query(0.0, alias="ss", description="Start time in seconds")):
     stream_info = movie_scanner.get_stream_info(file_id)
     if not stream_info:
         raise HTTPException(status_code=404, detail="Could not generate stream info from Google Drive.")
 
     async def robust_ffmpeg_streamer():
-        # FFmpeg command now reads from stdin ('-i -')
+        # Format headers for FFmpeg
+        headers_str = "".join([f"{k}: {v}\r\n" for k, v in stream_info["headers"].items()])
+        
+        # FFmpeg command with native URL and seek support
         ffmpeg_cmd = [
             'ffmpeg',
-            '-i', '-',
+            '-headers', headers_str,
+            '-ss', str(start_time),  # Fast seek BEFORE input
+            '-i', stream_info["url"],
             '-vcodec', 'h264_videotoolbox',
             '-acodec', 'aac',
+            '-b:v', '4M',            # Set a reasonable bitrate for performance
             '-preset', 'ultrafast',
             '-tune', 'zerolatency',
             '-pix_fmt', 'yuv420p',
-            '-movflags', 'frag_keyframe+empty_moov',
+            # Use fragmented MP4 for better streaming and seeking
+            '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
             '-f', 'mp4',
             '-loglevel', 'error',
             'pipe:1'
@@ -74,41 +77,14 @@ async def stream_gdrive_video(file_id: str):
 
         process = await asyncio.create_subprocess_exec(
             *ffmpeg_cmd,
-            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
 
-        downloader_task = None
-
         try:
-            # Task 1: Asynchronously download from Google Drive and feed to FFmpeg's stdin
-            async def download_and_feed():
-                try:
-                    # Use the URL and Headers from get_stream_info
-                    async with httpx.AsyncClient(timeout=None) as client:
-                        async with client.stream("GET", stream_info["url"], headers=stream_info["headers"]) as response:
-                            response.raise_for_status()
-                            async for chunk in response.aiter_bytes():
-                                if process.stdin.is_closing():
-                                    break
-                                try:
-                                    process.stdin.write(chunk)
-                                    await process.stdin.drain()
-                                except (BrokenPipeError, ConnectionResetError):
-                                    # This can happen if the client closes the connection
-                                    break
-                except Exception as e:
-                    print(f"Downloader task error: {e}")
-                finally:
-                    if not process.stdin.is_closing():
-                        process.stdin.close()
-
-            downloader_task = asyncio.create_task(download_and_feed())
-
-            # Task 2: Read transcoded data from FFmpeg's stdout and yield to the client
+            # Read transcoded data from FFmpeg's stdout and yield to the client
             while True:
-                chunk = await process.stdout.read(4096)
+                chunk = await process.stdout.read(65536) # Increased chunk size for better throughput
                 if not chunk:
                     break
                 yield chunk
@@ -117,18 +93,17 @@ async def stream_gdrive_video(file_id: str):
             print(f"Streaming yield error: {e}")
 
         finally:
-            # Final cleanup
-            if downloader_task and not downloader_task.done():
-                downloader_task.cancel()
             if process.returncode is None:
-                process.terminate()
+                try:
+                    process.terminate()
+                except ProcessLookupError:
+                    pass
             
             stderr_output = await process.stderr.read()
             if stderr_output:
                 print(f"FFmpeg stderr: {stderr_output.decode()}")
             
             await process.wait()
-
 
     return StreamingResponse(robust_ffmpeg_streamer(), media_type="video/mp4")
 
@@ -137,9 +112,10 @@ async def get_movie_poster(title: str, year: Optional[str] = Query(None, descrip
     """
     Get the poster URL for a given movie title and optional year.
     """
-    poster_url = tmdb_api.get_poster_url(title, year)
+    poster_url = await tmdb_api.get_poster_url(title, year)
     if not poster_url:
-        raise HTTPException(status_code=404, detail=f"No poster found for movie '{title}' (Year: {year})")
+        # Fallback to a placeholder instead of raising 404 to keep the frontend smooth
+        return {"title": title, "year": year, "poster_url": "https://via.placeholder.com/300x450?text=No+Poster"}
     return {"title": title, "year": year, "poster_url": poster_url}
 
 
