@@ -7,3 +7,4 @@ google-auth-oauthlib
 fastapi
 uvicorn
 httpx
+nicegui
